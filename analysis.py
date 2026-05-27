@@ -1,18 +1,19 @@
 """
-Comprehensive calibration-based trust analysis.
+Calibration-based trust analysis using Subjective Logic (SL).
 
-This module implements and visualises three evaluations requested in the
-chapter TODO:
+This module implements and visualises four evaluations:
 
-  1. ECE comparison  – ECE plotted alongside SL trust metrics over training
-                       epochs, illustrating the richer information provided by
-                       the SL framework.
+  1. Trust metrics      – per-class belief, disbelief, and uncertainty curves
+                          over training epochs, before and after calibration.
 
-  2. Cluster variation – how the global trust opinion changes as the number of
-                        probability clusters M varies, for a fixed (final)
-                        epoch.
+  2. ECE comparison     – ECE plotted alongside SL trust metrics over training
+                          epochs, illustrating the richer information provided
+                          by the SL framework.
 
-  3. Dynamic assessment – per-prediction trust scores obtained by looking up
+  3. Cluster variation  – how the global trust opinion changes as the number of
+                          probability clusters M varies at the final epoch.
+
+  4. Dynamic assessment – per-prediction trust scores obtained by looking up
                           pre-computed cluster opinions at inference time.
 
 Usage:
@@ -338,6 +339,8 @@ def plot_trust_and_ece(directory: str, outdir: str,
                         linewidth=1.0, alpha=0.9)
             ax.set_xlabel('Epoch', fontsize=LABEL_FONTSIZE)
             ax.set_ylabel(col_lbl, fontsize=LABEL_FONTSIZE)
+            if mk != 'u':
+                ax.set_ylim(0, 1)
             if row == 0:
                 ax.set_title(col_lbl, fontsize=TITLE_FONTSIZE)
 
@@ -435,7 +438,7 @@ def plot_cluster_variation(directory: str, outdir: str,
         ax.set_xticklabels([str(m) for m in m_values], rotation=45)
         ax.legend(fontsize=LABEL_FONTSIZE - 1)
         ax.grid(axis='y', linestyle='--', alpha=0.4)
-        ax.set_ylim(-0.02, 1.02)
+        ax.set_ylim(0, 1)
 
     fig.suptitle(
         f'{dataset_name} — Trust opinion vs. number of clusters '
@@ -531,7 +534,7 @@ def plot_dynamic_assessment(directory: str, outdir: str,
     ax.set_ylabel('Trust belief $b$', fontsize=LABEL_FONTSIZE)
     ax.set_title('Confidence vs. Trust Belief', fontsize=TITLE_FONTSIZE)
     ax.set_xlim(-0.02, 1.02)
-    ax.set_ylim(-0.02, 1.02)
+    ax.set_ylim(0, 1)
     ax.grid(linestyle='--', alpha=0.3)
 
     # --- Panel B: histogram of belief ---
@@ -560,7 +563,7 @@ def plot_dynamic_assessment(directory: str, outdir: str,
     ax.set_title('Mean Trust Opinion per Confidence Bin', fontsize=TITLE_FONTSIZE)
     ax.legend(fontsize=LABEL_FONTSIZE - 1)
     ax.set_xlim(-0.02, 1.02)
-    ax.set_ylim(-0.02, 1.02)
+    ax.set_ylim(0, 1)
     ax.grid(linestyle='--', alpha=0.3)
 
     fig.suptitle(
@@ -615,7 +618,7 @@ def plot_trust_all(directory: str, outdir: str,
             per_class_aft['u'][c].append(op_a.u)
         epochs.append(epoch)
 
-    fig, axs = plt.subplots(2, 3, figsize=(13, 5))
+    fig, axs = plt.subplots(2, 3, figsize=(13, 6))
 
     col_map = [('b', 'Trust'), ('d', 'DisTrust'), ('u', 'Uncertainty')]
 
@@ -635,15 +638,18 @@ def plot_trust_all(directory: str, outdir: str,
                 ax.ticklabel_format(axis='y', style='sci',
                                     scilimits=(-2, -2))
 
-    # Synchronise y-limits between before/after rows per column
-    for col in range(3):
-        ylims = [axs[r][col].get_ylim() for r in range(2)]
-        ymin = min(y[0] for y in ylims)
-        ymax = max(y[1] for y in ylims)
+    # Fix y-axis to [0, 1] for belief and disbelief columns only
+    for col in range(2):
         for r in range(2):
-            axs[r][col].set_ylim(ymin, ymax)
-            axs[r][col].set_yticks(np.around(np.linspace(ymin, ymax, 5),
-                                              3 if col == 2 else 1))
+            axs[r][col].set_ylim(0, 1)
+            axs[r][col].set_yticks(np.linspace(0, 1, 6))
+    # Synchronise uncertainty y-limits between before/after rows (auto-range)
+    ylims = [axs[r][2].get_ylim() for r in range(2)]
+    ymin = min(y[0] for y in ylims)
+    ymax = max(y[1] for y in ylims)
+    for r in range(2):
+        axs[r][2].set_ylim(ymin, ymax)
+        axs[r][2].set_yticks(np.around(np.linspace(ymin, ymax, 5), 3))
 
     # Shared colorbar
     sm = plt.cm.ScalarMappable(cmap='viridis',
@@ -653,14 +659,14 @@ def plot_trust_all(directory: str, outdir: str,
     cbar_ax = fig.add_axes([0.94, 0.15, 0.005, 0.7])
     fig.colorbar(sm, cax=cbar_ax)
 
-    fig.text(0.5, 0.94, 'Before Calibration', ha='center', fontsize=14)
+    fig.text(0.5, 0.9, 'Before Calibration', ha='center', fontsize=14)
     fig.text(0.5, 0.47, 'After Calibration',  ha='center', fontsize=14)
-    line1 = plt.Line2D([0.05, 0.93], [0.48, 0.48], color='black',
-                        linewidth=1.2, transform=fig.transFigure)
-    line2 = plt.Line2D([0.05, 0.93], [0.96, 0.96], color='black',
-                        linewidth=1.2, transform=fig.transFigure)
-    fig.add_artist(line1)
-    fig.add_artist(line2)
+    # line1 = plt.Line2D([0.05, 0.93], [0.48, 0.48], color='black',
+    #                     linewidth=1.2, transform=fig.transFigure)
+    # line2 = plt.Line2D([0.05, 0.93], [0.96, 0.96], color='black',
+    #                     linewidth=1.2, transform=fig.transFigure)
+    # fig.add_artist(line1)
+    # fig.add_artist(line2)
 
     os.makedirs(outdir, exist_ok=True)
     fig.savefig(os.path.join(outdir, f'{dataset_name}_ALL.pdf'),

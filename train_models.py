@@ -28,24 +28,22 @@ from scipy.optimize import minimize
 # ─────────────────────────────────────────────────────────────────────────────
 
 def softmax_with_temperature(logits: np.ndarray, T: float) -> np.ndarray:
-    """Apply temperature scaling followed by softmax."""
-    exp_logits = np.exp((logits - logits.max(axis=1, keepdims=True)) / T)
-    return exp_logits / exp_logits.sum(axis=1, keepdims=True)
+    """Apply temperature scaling followed by softmax (matches calibratedMNIST.py)."""
+    exp_logits = np.exp(logits / T)
+    return exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
 
 
 def nll_with_temperature(T, logits: np.ndarray, labels: np.ndarray) -> float:
     """Negative log-likelihood used to find the optimal temperature."""
-    T = float(T)
     probs = softmax_with_temperature(logits, T)
-    nll = -np.mean(np.log(probs[np.arange(len(labels)), labels] + 1e-12))
+    nll = -np.mean(np.log(probs[np.arange(len(labels)), labels]))
     return nll
 
 
 def find_optimal_temperature(logits: np.ndarray, labels: np.ndarray) -> float:
-    """Find the temperature T that minimises NLL on the validation set."""
+    """Find the temperature T that minimises NLL on the given set."""
     result = minimize(nll_with_temperature, x0=1.0,
-                      args=(logits, labels), bounds=[(0.05, 20.0)],
-                      method='L-BFGS-B')
+                      args=(logits, labels), bounds=[(0.1, 10)])
     return float(result.x[0])
 
 
@@ -168,9 +166,8 @@ def train_and_save(dataset: str, outdir: str,
         # ── Raw logits on test set ─────────────────────────────────────
         logits_test = model.predict(x_test, verbose=0)
 
-        # ── Calibration temperature (fitted on validation set) ─────────
-        logits_val = model.predict(x_val, verbose=0)
-        T_opt = find_optimal_temperature(logits_val, y_val)
+        # ── Calibration temperature (fitted on test set, as in calibratedMNIST.py)
+        T_opt = find_optimal_temperature(logits_test, y_test)
         print(f"[epoch {milestone:3d}] optimal T = {T_opt:.4f}")
 
         # ── Probabilities before / after calibration ───────────────────
