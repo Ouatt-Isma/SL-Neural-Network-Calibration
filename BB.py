@@ -68,7 +68,7 @@ def main():
     epochs = [1]+list(range(10, 101, 10))
     Tos_bef = {}
     Tos_aft = {}
-    
+
     ## PARAMS
 
     # directory = "MNIST_PRED_T"
@@ -92,11 +92,11 @@ def main():
             # res_dic[f] = (resOp1.t, resOp1.d, resOp1.u)
             res_dic[f] = resOp1
         # print(res_dic)
-        
-    
+
+
         for epoch in epochs:
-            key_aft = f"{directory}\\aft_{epoch}.csv"
-            key_bef = f"{directory}\\bef_{epoch}.csv"
+            key_aft = os.path.join(directory, f"aft_{epoch}.csv")
+            key_bef = os.path.join(directory, f"bef_{epoch}.csv")
 
            
             Tos_aft[f"{curr_class}"].append(res_dic[key_aft])
