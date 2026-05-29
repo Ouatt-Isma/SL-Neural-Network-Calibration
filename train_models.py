@@ -7,7 +7,7 @@ Predictions are saved in CSV format compatible with the analysis pipeline.
 
 Usage:
     python train_models.py --dataset mnist  --outdir data/MNIST_PRED
-    python train_models.py --dataset cifar10 --outdir data/CIFAR10_PRED
+    python train_models.py --dataset cifar10 --outdir data/CIFAR_PRED
 
 Each output directory will contain files like:
     bef_1.csv, aft_1.csv, bef_10.csv, aft_10.csv, ...
