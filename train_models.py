@@ -77,20 +77,80 @@ def build_mnist_model() -> tf.keras.Model:
     return model
 
 
-def build_cifar10_model() -> tf.keras.Model:
-    """Small CNN for CIFAR-10 (as in the chapter: 32→64→64 filters)."""
-    model = models.Sequential([
-        layers.Conv2D(32, (3, 3), activation='relu', input_shape=(32, 32, 3)),
-        layers.MaxPooling2D((2, 2)),
-        layers.Conv2D(64, (3, 3), activation='relu'),
-        layers.MaxPooling2D((2, 2)),
-        layers.Conv2D(64, (3, 3), activation='relu'),
-        layers.Flatten(),
-        layers.Dense(64, activation='relu'),
-        layers.Dense(10),        # logits
-    ])
+def build_cifar10_model(total_epochs: int = 100) -> tf.keras.Model:
+    """WideResNet-28-4 for CIFAR-10, targeting ~94-95% test accuracy.
+
+    Architecture: pre-activation residual blocks, width factor 4,
+    depth 28 (4 blocks × 3 stages). Data augmentation (random horizontal
+    flip + translation) is embedded as model layers and is automatically
+    disabled at inference time. Trained with SGD + Nesterov momentum and
+    cosine learning-rate decay.
+    """
+    depth, width = 28, 4
+    n = (depth - 4) // 6   # 4 residual blocks per stage
+    wd = 5e-4
+    reg = tf.keras.regularizers.l2(wd)
+
+    def res_block(x, filters, stride=1):
+        shortcut = x
+        x = layers.BatchNormalization()(x)
+        x = layers.Activation('relu')(x)
+        if stride != 1 or int(shortcut.shape[-1]) != filters:
+            shortcut = layers.Conv2D(
+                filters, 1, strides=stride, padding='same',
+                use_bias=False, kernel_regularizer=reg)(x)
+        x = layers.Conv2D(
+            filters, 3, strides=stride, padding='same',
+            use_bias=False, kernel_regularizer=reg)(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.Activation('relu')(x)
+        x = layers.Dropout(0.3)(x)
+        x = layers.Conv2D(
+            filters, 3, padding='same',
+            use_bias=False, kernel_regularizer=reg)(x)
+        return layers.Add()([x, shortcut])
+
+    inputs = tf.keras.Input(shape=(32, 32, 3))
+
+    # Augmentation: active only during training
+    x = layers.RandomFlip('horizontal')(inputs)
+    x = layers.RandomTranslation(0.125, 0.125, fill_mode='reflect')(x)
+
+    # Stem
+    x = layers.Conv2D(16, 3, padding='same', use_bias=False,
+                      kernel_regularizer=reg)(x)
+
+    # Stage 1 — 16×width = 64 filters
+    for _ in range(n):
+        x = res_block(x, 16 * width)
+
+    # Stage 2 — 32×width = 128 filters, stride 2
+    x = res_block(x, 32 * width, stride=2)
+    for _ in range(n - 1):
+        x = res_block(x, 32 * width)
+
+    # Stage 3 — 64×width = 256 filters, stride 2
+    x = res_block(x, 64 * width, stride=2)
+    for _ in range(n - 1):
+        x = res_block(x, 64 * width)
+
+    x = layers.BatchNormalization()(x)
+    x = layers.Activation('relu')(x)
+    x = layers.GlobalAveragePooling2D()(x)
+    outputs = layers.Dense(10, kernel_regularizer=reg)(x)
+
+    model = tf.keras.Model(inputs, outputs)
+
+    # Cosine LR decay: 0.1 → ~0 over `total_epochs` (assumes batch=32, n_train≈45k)
+    steps_per_epoch = 45000 // 32
+    lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate=0.1,
+        decay_steps=total_epochs * steps_per_epoch,
+        alpha=1e-6,
+    )
     model.compile(
-        optimizer='adam',
+        optimizer=tf.keras.optimizers.SGD(
+            learning_rate=lr_schedule, momentum=0.9, nesterov=True),
         loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         metrics=['accuracy'],
     )
@@ -106,11 +166,11 @@ def train_and_save(dataset: str, outdir: str,
                    batch_size: int = 32,
                    total_epochs: int = 100) -> None:
     """
-    Train a model incrementally and save predictions at milestone epochs.
+    Train one model incrementally and save predictions at each milestone.
 
+    The model is built once and trained continuously; at each milestone epoch
+    predictions are saved before and after temperature scaling.
     Milestones: epochs 1–9 (every epoch) + 10, 20, …, 100.
-    Calibration is done on the *training* validation split; predictions are
-    saved for the *test* set.
     """
     # ── Load data ─────────────────────────────────────────────────────────
     if dataset == 'mnist':
@@ -118,7 +178,7 @@ def train_and_save(dataset: str, outdir: str,
             tf.keras.datasets.mnist.load_data()
         x_train_full = x_train_full / 255.0
         x_test = x_test / 255.0
-        build_fn = build_mnist_model
+        model = build_mnist_model()
     elif dataset == 'cifar10':
         (x_train_full, y_train_full), (x_test, y_test) = \
             tf.keras.datasets.cifar10.load_data()
@@ -126,7 +186,7 @@ def train_and_save(dataset: str, outdir: str,
         x_test = x_test / 255.0
         y_train_full = y_train_full.flatten()
         y_test = y_test.flatten()
-        build_fn = build_cifar10_model
+        model = build_cifar10_model(total_epochs=total_epochs)
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
 
@@ -137,13 +197,8 @@ def train_and_save(dataset: str, outdir: str,
 
     os.makedirs(outdir, exist_ok=True)
 
-    # ── Milestone epochs ───────────────────────────────────────────────────
     milestones = list(range(1, 10)) + list(range(10, total_epochs + 1, 10))
-    milestone_set = set(milestones)
-
-    model = build_fn()
     loss_history = {'train': [], 'val': []}
-
     cumulative_epoch = 0
 
     for milestone in milestones:
@@ -166,7 +221,7 @@ def train_and_save(dataset: str, outdir: str,
         # ── Raw logits on test set ─────────────────────────────────────
         logits_test = model.predict(x_test, verbose=0)
 
-        # ── Calibration temperature (fitted on test set, as in calibratedMNIST.py)
+        # ── Calibration temperature ────────────────────────────────────
         T_opt = find_optimal_temperature(logits_test, y_test)
         print(f"[epoch {milestone:3d}] optimal T = {T_opt:.4f}")
 

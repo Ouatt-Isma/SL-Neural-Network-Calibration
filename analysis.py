@@ -339,8 +339,7 @@ def plot_trust_and_ece(directory: str, outdir: str,
                         linewidth=1.0, alpha=0.9)
             ax.set_xlabel('Epoch', fontsize=LABEL_FONTSIZE)
             ax.set_ylabel(col_lbl, fontsize=LABEL_FONTSIZE)
-            if mk != 'u':
-                ax.set_ylim(0, 1)
+            ax.set_ylim(0, 1)
             if row == 0:
                 ax.set_title(col_lbl, fontsize=TITLE_FONTSIZE)
 
@@ -394,7 +393,7 @@ def plot_cluster_variation(directory: str, outdir: str,
     Saved to <outdir>/<dataset_name>_clusters.pdf.
     """
     if m_values is None:
-        m_values = [2, 3, 5, 8, 10, 15, 20, 30, 50]
+        m_values = [2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100]
 
     epoch_data = list_epoch_files(directory)
     if not epoch_data:
@@ -458,124 +457,127 @@ def plot_cluster_variation(directory: str, outdir: str,
 
 def plot_dynamic_assessment(directory: str, outdir: str,
                               dataset_name: str,
-                              n_clusters: int = 10) -> None:
+                              n_clusters: int = 10,
+                              class_id: int = None) -> None:
     """
     Illustrate the dynamic (per-prediction) trust assessment mechanism.
 
-    For the last available epoch, after calibration:
-      - Panel A (left):  Scatter plot — predicted confidence vs. belief,
-                         coloured by correctness.
-      - Panel B (middle): Histograms of per-prediction belief for correct
-                          vs. incorrect predictions.
-      - Panel C (right):  Mean opinion components (b, d, u) binned by
-                          predicted confidence — a calibration-reliability
-                          diagram for the trust framework.
-
-    Saved to <outdir>/<dataset_name>_dynamic.pdf.
+    2×3 grid: Row 0 = before calibration, Row 1 = after calibration.
+    Columns: scatter (confidence vs belief), stacked proportion bar,
+             mean opinion per confidence bin.
     """
     epoch_data = list_epoch_files(directory)
     if not epoch_data:
         print(f"[plot_dynamic_assessment] No files found in {directory}")
         return
 
-    last_epoch, _, aft_path = epoch_data[-1]
-    d_aft = pd.read_csv(aft_path)
+    last_epoch, bef_path, aft_path = epoch_data[-1]
 
-    # Build lookup table from this epoch's data
-    lookup = build_cluster_lookup(d_aft, n_clusters=n_clusters)
-    result = get_per_prediction_trust(d_aft, lookup, n_clusters=n_clusters)
+    def _get_result(path):
+        d = pd.read_csv(path)
+        lookup = build_cluster_lookup(d, n_clusters=n_clusters)
+        res = get_per_prediction_trust(d, lookup, n_clusters=n_clusters)
+        if class_id is not None:
+            n_cls = sum(1 for c in d.columns
+                        if c.startswith('Class_') and c.endswith('_Probability'))
+            pred_cls = d[[f'Class_{i}_Probability' for i in range(n_cls)]].values.argmax(axis=1)
+            m = pred_cls == class_id
+            res = {k: v[m] for k, v in res.items()}
+        return res
 
-    belief      = result['belief']
-    disbelief   = result['disbelief']
-    uncertainty = result['uncertainty']
-    confidence  = result['confidence']
-    correct     = result['correct']
+    results = [_get_result(bef_path), _get_result(aft_path)]
+    row_labels = ['Before Calibration', 'After Calibration']
 
-    # ── Panel A: confidence vs belief scatter (sample for speed) ─────────
-    rng = np.random.default_rng(42)
-    idx = rng.choice(len(belief),
-                     size=min(2000, len(belief)),
-                     replace=False)
-
-    # ── Panel C: mean opinion per confidence bin ──────────────────────────
     n_bins = n_clusters
-    bin_edges = np.linspace(0, 1, n_bins + 1)
+    bin_edges   = np.linspace(0, 1, n_bins + 1)
     bin_centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    mean_b, mean_d, mean_u = [], [], []
-    for i in range(n_bins):
-        mask = (confidence > bin_edges[i]) & (confidence <= bin_edges[i + 1])
-        if mask.sum() > 0:
-            mean_b.append(belief[mask].mean())
-            mean_d.append(disbelief[mask].mean())
-            mean_u.append(uncertainty[mask].mean())
-        else:
-            mean_b.append(np.nan)
-            mean_d.append(np.nan)
-            mean_u.append(np.nan)
+    hist_bins   = np.linspace(0, 1, n_clusters + 1)
+    hist_centres= 0.5 * (hist_bins[:-1] + hist_bins[1:])
+    bar_width   = (hist_bins[1] - hist_bins[0]) * 0.85
 
-    # ── Figure ────────────────────────────────────────────────────────────
-    fig, axs = plt.subplots(1, 3, figsize=(15, 4.5),
-                             gridspec_kw={'wspace': 0.35})
+    fig, axs = plt.subplots(2, 3, figsize=(15, 9),
+                             gridspec_kw={'wspace': 0.35, 'hspace': 0.45})
 
-    # --- Panel A: scatter ---
-    ax = axs[0]
-    colors_scatter = np.where(correct[idx], '#2196F3', '#F44336')
-    ax.scatter(confidence[idx], belief[idx], c=colors_scatter,
-               s=8, alpha=0.4, rasterized=True)
-    from matplotlib.lines import Line2D
-    legend_elements = [
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='#2196F3',
-               markersize=7, label='Correct'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='#F44336',
-               markersize=7, label='Incorrect'),
-    ]
-    ax.legend(handles=legend_elements, fontsize=LABEL_FONTSIZE - 1)
-    ax.set_xlabel('Predicted confidence', fontsize=LABEL_FONTSIZE)
-    ax.set_ylabel('Trust belief $b$', fontsize=LABEL_FONTSIZE)
-    ax.set_title('Confidence vs. Trust Belief', fontsize=TITLE_FONTSIZE)
-    ax.set_xlim(-0.02, 1.02)
-    ax.set_ylim(0, 1)
-    ax.grid(linestyle='--', alpha=0.3)
+    for row, (res, row_lbl) in enumerate(zip(results, row_labels)):
+        belief      = res['belief']
+        disbelief   = res['disbelief']
+        uncertainty = res['uncertainty']
+        confidence  = res['confidence']
+        correct     = res['correct']
 
-    # --- Panel B: histogram of belief ---
-    ax = axs[1]
-    bins = np.linspace(0, 1, 21)
-    ax.hist(belief[correct],   bins=bins, density=True, alpha=0.6,
-            color='#2196F3', label='Correct', edgecolor='none')
-    ax.hist(belief[~correct],  bins=bins, density=True, alpha=0.6,
-            color='#F44336', label='Incorrect', edgecolor='none')
-    ax.set_xlabel('Trust belief $b$ per prediction', fontsize=LABEL_FONTSIZE)
-    ax.set_ylabel('Density', fontsize=LABEL_FONTSIZE)
-    ax.set_title('Distribution of Per-Prediction Belief', fontsize=TITLE_FONTSIZE)
-    ax.legend(fontsize=LABEL_FONTSIZE - 1)
-    ax.grid(axis='y', linestyle='--', alpha=0.3)
+        def _stacked_bar(ax, values, correct_mask, xlabel, title, row):
+            total_c, _   = np.histogram(values, bins=hist_bins)
+            correct_c, _ = np.histogram(values[correct_mask], bins=hist_bins)
+            incorrect_c  = total_c - correct_c
+            safe  = np.maximum(total_c, 1)
+            p_cor = np.where(total_c > 0, correct_c   / safe, 0)
+            p_inc = np.where(total_c > 0, incorrect_c / safe, 0)
+            ax.bar(hist_centres, p_cor, width=bar_width, color='#2196F3',
+                   alpha=0.7, label='Correct')
+            ax.bar(hist_centres, p_inc, width=bar_width, color='#F44336',
+                   alpha=0.7, label='Incorrect', bottom=p_cor)
+            for center, total in zip(hist_centres, total_c):
+                if total > 0:
+                    ax.text(center, 1.02, str(int(total)),
+                            ha='center', va='bottom', fontsize=6, rotation=90)
+            ax.set_xlabel(xlabel, fontsize=LABEL_FONTSIZE)
+            ax.set_ylabel('Proportion within bin', fontsize=LABEL_FONTSIZE)
+            ax.set_ylim(0, 1.4)
+            if row == 0:
+                ax.set_title(title, fontsize=TITLE_FONTSIZE)
+            ax.legend(fontsize=LABEL_FONTSIZE - 1)
+            ax.grid(axis='y', linestyle='--', alpha=0.3)
 
-    # --- Panel C: mean opinion per confidence bin ---
-    ax = axs[2]
-    ax.plot(bin_centres, mean_b, 'o-',   color='steelblue',  linewidth=1.8,
-            markersize=5, label='Belief')
-    ax.plot(bin_centres, mean_d, 's--',  color='firebrick',  linewidth=1.8,
-            markersize=5, label='Disbelief')
-    ax.plot(bin_centres, mean_u, '^:',   color='seagreen',   linewidth=1.8,
-            markersize=5, label='Uncertainty')
-    ax.set_xlabel('Predicted confidence', fontsize=LABEL_FONTSIZE)
-    ax.set_ylabel('Mean opinion component', fontsize=LABEL_FONTSIZE)
-    ax.set_title('Mean Trust Opinion per Confidence Bin', fontsize=TITLE_FONTSIZE)
-    ax.legend(fontsize=LABEL_FONTSIZE - 1)
-    ax.set_xlim(-0.02, 1.02)
-    ax.set_ylim(0, 1)
-    ax.grid(linestyle='--', alpha=0.3)
+        # --- Panel A: proportion by predicted confidence ---
+        _stacked_bar(axs[row][0], confidence, correct,
+                     'Predicted confidence', 'Distribution of Predicted Confidence', row)
 
+        # --- Panel B: proportion by trust belief ---
+        _stacked_bar(axs[row][1], belief, correct,
+                     'Trust belief $b$', 'Distribution of Trust Belief', row)
+
+        # --- Panel C: mean opinion per confidence bin ---
+        ax = axs[row][2]
+        mean_b, mean_d, mean_u = [], [], []
+        for i in range(n_bins):
+            m = (confidence > bin_edges[i]) & (confidence <= bin_edges[i + 1])
+            if m.sum() > 0:
+                mean_b.append(belief[m].mean())
+                mean_d.append(disbelief[m].mean())
+                mean_u.append(uncertainty[m].mean())
+            else:
+                mean_b.append(np.nan); mean_d.append(np.nan); mean_u.append(np.nan)
+        ax.plot(bin_centres, mean_b, 'o-',  color='steelblue', linewidth=1.8,
+                markersize=5, label='Belief')
+        ax.plot(bin_centres, mean_d, 's--', color='firebrick', linewidth=1.8,
+                markersize=5, label='Disbelief')
+        ax.plot(bin_centres, mean_u, '^:',  color='seagreen',  linewidth=1.8,
+                markersize=5, label='Uncertainty')
+        ax.set_xlabel('Predicted confidence', fontsize=LABEL_FONTSIZE)
+        ax.set_ylabel('Mean opinion component', fontsize=LABEL_FONTSIZE)
+        if row == 0:
+            ax.set_title('Mean Trust Opinion per Confidence Bin', fontsize=TITLE_FONTSIZE)
+        ax.legend(fontsize=LABEL_FONTSIZE - 1)
+        ax.set_xlim(-0.02, 1.02);  ax.set_ylim(0, 1)
+        ax.grid(linestyle='--', alpha=0.3)
+
+        # Row label on the left
+        axs[row][0].annotate(row_lbl, xy=(-0.35, 0.5), xycoords='axes fraction',
+                              rotation=90, va='center', ha='center',
+                              fontsize=TITLE_FONTSIZE, fontweight='bold')
+
+    class_label = f'class {class_id}' if class_id is not None else 'all classes'
     fig.suptitle(
         f'{dataset_name} — Dynamic trust assessment at inference '
-        f'(epoch {last_epoch}, after calibration)',
+        f'(epoch {last_epoch}, {class_label})',
         fontsize=TITLE_FONTSIZE,
     )
     os.makedirs(outdir, exist_ok=True)
-    fig.savefig(os.path.join(outdir, f'{dataset_name}_dynamic.pdf'),
-                bbox_inches='tight')
+    fname = (f'{dataset_name}_dynamic_class{class_id}.pdf'
+             if class_id is not None else f'{dataset_name}_dynamic.pdf')
+    fig.savefig(os.path.join(outdir, fname), bbox_inches='tight')
     plt.close(fig)
-    print(f"Saved {dataset_name}_dynamic.pdf")
+    print(f"Saved {fname}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -634,22 +636,12 @@ def plot_trust_all(directory: str, outdir: str,
             ax.set_ylabel(col_lbl)
             if row == 1:
                 ax.set_xlabel('Epochs')
-            if col == 2:
-                ax.ticklabel_format(axis='y', style='sci',
-                                    scilimits=(-2, -2))
 
-    # Fix y-axis to [0, 1] for belief and disbelief columns only
-    for col in range(2):
+    # Fix y-axis to [0, 1] for all three columns
+    for col in range(3):
         for r in range(2):
             axs[r][col].set_ylim(0, 1)
             axs[r][col].set_yticks(np.linspace(0, 1, 6))
-    # Synchronise uncertainty y-limits between before/after rows (auto-range)
-    ylims = [axs[r][2].get_ylim() for r in range(2)]
-    ymin = min(y[0] for y in ylims)
-    ymax = max(y[1] for y in ylims)
-    for r in range(2):
-        axs[r][2].set_ylim(ymin, ymax)
-        axs[r][2].set_yticks(np.around(np.linspace(ymin, ymax, 5), 3))
 
     # Shared colorbar
     sm = plt.cm.ScalarMappable(cmap='viridis',
@@ -726,10 +718,10 @@ def print_ece_table(directories: dict) -> None:
         {dataset_name: directory_path}
     """
     print("\n% ECE summary table")
-    print(r"\begin{tabular}{lcc}")
+    print(r"\begin{tabular}{lccc}")
     print(r"\toprule")
-    print(r"\textbf{Dataset} & \textbf{ECE (pre-calibration)} "
-          r"& \textbf{ECE (post-calibration)} \\")
+    print(r"\textbf{Dataset} & \textbf{Accuracy} "
+          r"& \textbf{ECE (pre-calibration)} & \textbf{ECE (post-calibration)} \\")
     print(r"\midrule")
     for ds_name, directory in directories.items():
         epoch_data = list_epoch_files(directory)
@@ -740,7 +732,12 @@ def print_ece_table(directories: dict) -> None:
         d_aft = pd.read_csv(aft_path)
         ece_bef = compute_ece(d_bef)
         ece_aft = compute_ece(d_aft)
-        print(f"{ds_name:12s} & {ece_bef:.3f} & {ece_aft:.3f} \\\\")
+        n_classes = sum(1 for c in d_bef.columns if c.startswith('Class_') and
+                        c.endswith('_Probability'))
+        prob_cols = [f'Class_{i}_Probability' for i in range(n_classes)]
+        true_labels = d_bef['True Label'].values
+        acc_bef = (d_bef[prob_cols].values.argmax(axis=1) == true_labels).mean()
+        print(f"{ds_name:12s} & {acc_bef:.3f} & {ece_bef:.3f} & {ece_aft:.3f} \\\\")
     print(r"\bottomrule")
     print(r"\end{tabular}")
 
@@ -761,7 +758,7 @@ def parse_args():
     p.add_argument('--n_clusters', type=int, default=10,
                    help='Number of probability clusters M (default: 10)')
     p.add_argument('--m_values', nargs='+', type=int,
-                   default=[2, 3, 5, 8, 10, 15, 20, 30, 50],
+                   default=[2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200, 300, 400, 500, 1000],
                    help='M values for cluster-variation plot')
     p.add_argument('--skip_mnist',  action='store_true')
     p.add_argument('--skip_cifar',  action='store_true')
@@ -804,7 +801,9 @@ if __name__ == '__main__':
 
         # 5. NEW: Dynamic assessment
         plot_dynamic_assessment(directory, args.outdir, ds_name,
-                                 n_clusters=args.n_clusters)
+                                #  n_clusters=args.n_clusters, 
+                                #  class_id=0
+                                 )
 
     # 6. Print ECE table for LaTeX
     print_ece_table(datasets)
