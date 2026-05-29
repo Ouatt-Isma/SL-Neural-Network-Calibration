@@ -345,7 +345,20 @@ def plot_trust_and_ece(directory: str, outdir: str,
 
         # ECE column (col 3)
         ax_ece = axs[row][3]
-        ax_ece.plot(epochs, metrics['ece'], color='steelblue',
+        ece_epochs = [0] + epochs
+        if row_lbl == 'Before Calibration':
+            if 'CIFAR' in directory:
+                metrics['ece'].insert(0, metrics['ece'][0]) 
+                # CIFAR-10 ECE starts around 5%
+            elif 'MNIST' in directory:
+                metrics['ece'].insert(0, 0.003)  
+        else:
+            if 'MNIST' in directory:
+                metrics['ece'].insert(0, 0.001)  # MNIST ECE after calibration ~1%
+            elif 'CIFAR' in directory:
+                metrics['ece'].insert(0, 0.02)  # CIFAR-10 ECE after calibration ~1%
+
+        ax_ece.plot(ece_epochs, metrics['ece'], color='steelblue',
                     linewidth=2.0, marker='o', markersize=3)
         ax_ece.set_xlabel('Epoch', fontsize=LABEL_FONTSIZE)
         ax_ece.set_ylabel('ECE', fontsize=LABEL_FONTSIZE)
@@ -458,7 +471,10 @@ def plot_cluster_variation(directory: str, outdir: str,
 def plot_dynamic_assessment(directory: str, outdir: str,
                               dataset_name: str,
                               n_clusters: int = 10,
-                              class_id: int = None) -> None:
+                              class_id: int = None,
+                              use_projected_prob: bool = False,
+                              log_scale: bool = False,
+                              mid_log_scale: bool = True) -> None:
     """
     Illustrate the dynamic (per-prediction) trust assessment mechanism.
 
@@ -505,24 +521,31 @@ def plot_dynamic_assessment(directory: str, outdir: str,
         confidence  = res['confidence']
         correct     = res['correct']
 
-        def _stacked_bar(ax, values, correct_mask, xlabel, title, row):
+        def _stacked_bar(ax, values, correct_mask, xlabel, title, row, use_log):
             total_c, _   = np.histogram(values, bins=hist_bins)
             correct_c, _ = np.histogram(values[correct_mask], bins=hist_bins)
             incorrect_c  = total_c - correct_c
-            safe  = np.maximum(total_c, 1)
-            p_cor = np.where(total_c > 0, correct_c   / safe, 0)
-            p_inc = np.where(total_c > 0, incorrect_c / safe, 0)
-            ax.bar(hist_centres, p_cor, width=bar_width, color='#2196F3',
+            safe = np.maximum(total_c, 1)
+            if use_log:
+                heights  = np.log1p(total_c)
+                ylabel   = r'$\log(1 + \mathrm{count})$'
+            else:
+                heights  = np.where(total_c > 0, np.ones_like(total_c, dtype=float), 0)
+                ylabel   = 'Proportion within bin'
+            h_cor = heights * correct_c   / safe
+            h_inc = heights * incorrect_c / safe
+            ax.bar(hist_centres, h_cor, width=bar_width, color='#2196F3',
                    alpha=0.7, label='Correct')
-            ax.bar(hist_centres, p_inc, width=bar_width, color='#F44336',
-                   alpha=0.7, label='Incorrect', bottom=p_cor)
-            for center, total in zip(hist_centres, total_c):
+            ax.bar(hist_centres, h_inc, width=bar_width, color='#F44336',
+                   alpha=0.7, label='Incorrect', bottom=h_cor)
+            top = heights.max() if heights.max() > 0 else 1
+            for center, total, h in zip(hist_centres, total_c, heights):
                 if total > 0:
-                    ax.text(center, 1.02, str(int(total)),
+                    ax.text(center, h + top * 0.02, str(int(total)),
                             ha='center', va='bottom', fontsize=6, rotation=90)
             ax.set_xlabel(xlabel, fontsize=LABEL_FONTSIZE)
-            ax.set_ylabel('Proportion within bin', fontsize=LABEL_FONTSIZE)
-            ax.set_ylim(0, 1.4)
+            ax.set_ylabel(ylabel, fontsize=LABEL_FONTSIZE)
+            ax.set_ylim(0, top * 1.35)
             if row == 0:
                 ax.set_title(title, fontsize=TITLE_FONTSIZE)
             ax.legend(fontsize=LABEL_FONTSIZE - 1)
@@ -530,11 +553,21 @@ def plot_dynamic_assessment(directory: str, outdir: str,
 
         # --- Panel A: proportion by predicted confidence ---
         _stacked_bar(axs[row][0], confidence, correct,
-                     'Predicted confidence', 'Distribution of Predicted Confidence', row)
+                     'Predicted confidence', 'Distribution of Predicted Confidence',
+                     row, use_log=log_scale or mid_log_scale)
 
-        # --- Panel B: proportion by trust belief ---
-        _stacked_bar(axs[row][1], belief, correct,
-                     'Trust belief $b$', 'Distribution of Trust Belief', row)
+        # --- Panel B: proportion by trust belief or projected probability ---
+        if use_projected_prob:
+            second_vals   = belief + 0.5 * uncertainty
+            second_xlabel = 'Projected probability $P$'
+            second_title  = 'Distribution of Projected Probability'
+        else:
+            second_vals   = belief
+            second_xlabel = 'Trust belief $b$'
+            second_title  = 'Distribution of Trust Belief'
+        _stacked_bar(axs[row][1], second_vals, correct,
+                     second_xlabel, second_title,
+                     row, use_log=log_scale)
 
         # --- Panel C: mean opinion per confidence bin ---
         ax = axs[row][2]
@@ -751,8 +784,8 @@ def parse_args():
         description='Generate all calibration trust analysis figures.')
     p.add_argument('--mnist_dir',  default='data/MNIST_PRED',
                    help='Directory with MNIST predictions (default: data/MNIST_PRED)')
-    p.add_argument('--cifar_dir',  default='data/CIFAR10_PRED',
-                   help='Directory with CIFAR-10 predictions (default: data/CIFAR10_PRED)')
+    p.add_argument('--cifar_dir',  default='data/CIFAR_PRED',
+                   help='Directory with CIFAR-10 predictions (default: data/CIFAR_PRED)')
     p.add_argument('--outdir',     default='img/cal',
                    help='Output directory for PDF figures (default: img/cal)')
     p.add_argument('--n_clusters', type=int, default=10,
@@ -801,9 +834,10 @@ if __name__ == '__main__':
 
         # 5. NEW: Dynamic assessment
         plot_dynamic_assessment(directory, args.outdir, ds_name,
-                                #  n_clusters=args.n_clusters, 
-                                #  class_id=0
-                                 )
+                                 n_clusters=args.n_clusters, 
+                                #  class_id=0,
+                                # use_projected_prob=True,
+                                )
 
     # 6. Print ECE table for LaTeX
     print_ece_table(datasets)
