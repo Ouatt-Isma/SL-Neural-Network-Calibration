@@ -1,7 +1,13 @@
 # SL-Neural-Network-Calibration
 
-Code accompanying the PhD dissertation chapter on **Subjective Logic (SL) as a
-trust framework for neural network calibration**.
+**Calibration error, expressed as a Subjective Logic opinion.**
+
+Expected Calibration Error compresses a model's reliability into one number. This code turns the same per-bin evidence into a trust opinion `(belief, disbelief, uncertainty)`: bins where confidence matches accuracy add belief, bins that are over- or under-confident add disbelief, and sparsely populated bins leave uncertainty. The opinion can then be fused with other evidence about a model — which is how calibration enters the model-side trust score in [PaTAS](https://github.com/Ouatt-Isma/PaTAS-Subjective-Logic-Neural-Networks-Trust-Assessment).
+
+Code accompanying the paper:
+
+> **Quantifying Calibration Error in Neural Networks through Evidence-Based Theory**
+> K. I. Ouattara, I. Krontiris, T. Dimitrakos, F. Kargl — *FUSION 2025, 28th International Conference on Information Fusion.*
 
 The pipeline trains neural networks on MNIST and CIFAR-10, applies temperature
 scaling as a post-hoc calibration method, and evaluates the resulting
@@ -154,7 +160,22 @@ validation set using `scipy.optimize.minimize`.
 
 ---
 
-## Reference
+## Citation
 
-> Ouattara, I. (2025). *Trust Assessment of Neural Networks via Subjective
-> Logic and Calibration*. PhD Dissertation, Ulm University × Huawei.
+```bibtex
+@inproceedings{ouattara2025calibration,
+  title     = {Quantifying Calibration Error in Neural Networks through Evidence-Based Theory},
+  author    = {Ouattara, Koffi Ismael and Krontiris, Ioannis and Dimitrakos, Theo and Kargl, Frank},
+  booktitle = {Proceedings of the 28th International Conference on Information Fusion (FUSION)},
+  year      = {2025}
+}
+```
+
+## Related repositories
+
+- [`PaTAS-Subjective-Logic-Neural-Networks-Trust-Assessment`](https://github.com/Ouatt-Isma/PaTAS-Subjective-Logic-Neural-Networks-Trust-Assessment) — uses this library (as a submodule) for calibration-based model trust.
+- [`Trustworthiness-of-AI-Training-Dataset`](https://github.com/Ouatt-Isma/Trustworthiness-of-AI-Training-Dataset) — the data-side counterpart: trust opinions on training datasets.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
