@@ -14,6 +14,78 @@ scaling as a post-hoc calibration method, and evaluates the resulting
 predictions through both the standard Expected Calibration Error (ECE) and an
 SL-based trust opinion (belief, disbelief, uncertainty).
 
+> **Revision notice (September 2026).** The method and data in this repository
+> have been corrected with respect to the FUSION 2025 paper; see
+> [Method](#method) and [Data](#data) below. In short: the cluster
+> representative is the mean confidence of the cluster (not the interval
+> midpoint), the positive evidence is `n_i - s_i` (not the number of correct
+> predictions), fusion is cumulative at both levels, the temperature is fitted
+> on a held-out half of the test set, and the CIFAR-10 predictions originally
+> exported were passed through a second softmax (max confidence e/(e+9) = 0.232)
+> and have been recovered by inverting it. The CIFAR-10 results of the paper are
+> superseded by the ones this code produces.
+
+---
+
+## Method
+
+For every prediction, the *predicted class* is the arg-max class and the
+*confidence* is the maximum probability. For each predicted class `c`, the
+confidences are partitioned into `M` equal-width clusters (the last one
+closed, `[(M-1)/M, 1]`). In cluster `i`:
+
+| Symbol | Meaning |
+|---|---|
+| `n_i` | number of class-`c` predictions whose confidence falls in the cluster |
+| `t_i` | number of those that are correct |
+| `RP_i` | **mean confidence** of the `n_i` predictions (the representative) |
+| `s_i = \|t_i - n_i * RP_i\|` | negative evidence: deviation between stated confidence and observed accuracy |
+| `r_i = n_i - s_i` | positive evidence: predictions consistent with the stated confidence |
+
+`(r_i, s_i)` is turned into an opinion with the baseline-prior quantification
+(`b = r/(n+W)`, `d = s/(n+W)`, `u = W/(n+W)`, `W = 2`), so that `b ≈ 1 - gap`,
+`d ≈ gap` and `u` depends only on the cluster population. Cluster opinions are
+fused **cumulatively** into a class opinion and class opinions cumulatively
+into the global opinion (clusters and classes both partition the predictions,
+so they are disjoint evidence). Because `r_i + s_i = n_i`, the global
+uncertainty is `W/(N+W)` for every `M`, and the global disbelief is a
+class-conditional ECE.
+
+The *dynamic* mode keeps the `(class, cluster)` opinions as a lookup table and
+returns, for each prediction at inference time, the opinion of its cell:
+`b` high — the stated confidence was verified on the evaluation data; `d` high
+— it is known to be biased; `u` high — too few evaluation predictions to tell.
+
+---
+
+## Data
+
+`data/MNIST_PRED` and `data/CIFAR_PRED` are the original epoch-wise exports of
+the full 10,000-image test sets (`bef_E.csv` before, `aft_E.csv` after
+temperature scaling). **Do not use `data/CIFAR_PRED` directly**: those files
+were exported from a model whose output layer already applied a softmax, and
+the export applied `tf.nn.softmax` a second time, so every stored value is
+`softmax(q)` of the true softmax output `q` (max = e/(e+9) = 0.2320,
+min = 1/(e+9) = 0.0853). The `aft` files divided *probabilities* by a
+temperature (T = 0.217). MNIST was exported from logits and is correct.
+
+`prepare_eval_data.py` builds the evaluation data actually used by
+`analysis.py`:
+
+1. recovers the true CIFAR-10 probabilities by inverting the extra softmax
+   (`q = log p + (1 - sum log p)/K`, exact up to float32 precision);
+2. splits the 10,000 test images once (seed 0) into a 5,000-image
+   *calibration* half, used only to fit the temperature by NLL, and a
+   5,000-image *evaluation* half on which every number is reported;
+3. writes `data/<DS>_EVAL/{bef,aft}_E.csv`, `temperatures.json` and
+   `split.json`.
+
+The `_EVAL` directories are committed, so `python analysis.py` reproduces the
+figures directly. About 3 % of the CIFAR-10 samples have a true-class
+probability below the 1e-7 recovery floor, which slightly biases the fitted
+temperature downward; retraining with the current `train_models.py` (logits
+export, temperature fitted on the validation split) removes this residual.
+
 ---
 
 ## Repository structure
@@ -22,11 +94,14 @@ SL-based trust opinion (belief, disbelief, uncertainty).
 SL-Neural-Network-Calibration/
 ├── trustopinion.py          # Subjective Logic opinion class (core library)
 ├── train_models.py          # Train models and save epoch-wise predictions
+├── prepare_eval_data.py     # Recover CIFAR-10 probabilities, split test set, fit T
 ├── analysis.py              # Compute trust metrics and generate all figures
 ├── requirements.txt         # Python dependencies
 ├── data/
-│   ├── MNIST_PRED/          # bef_E.csv, aft_E.csv, loss_history.npy  (pre-computed)
-│   └── CIFAR_PRED/          # bef_E.csv, aft_E.csv, loss_history.npy  (pre-computed)
+│   ├── MNIST_PRED/          # original full-test-set exports (bef_E.csv, aft_E.csv, loss_history.npy)
+│   ├── CIFAR_PRED/          # original exports — double softmax, see Data
+│   ├── MNIST_EVAL/          # evaluation half + held-out temperature (used by analysis.py)
+│   └── CIFAR_EVAL/          # recovered probabilities, evaluation half (used by analysis.py)
 └── img/
     └── cal/                 # Output PDF figures (generated by analysis.py)
 ```
@@ -58,8 +133,13 @@ With the pre-computed predictions already in `data/`, run:
 python analysis.py
 ```
 
-This reads from `data/MNIST_PRED` and `data/CIFAR_PRED` and saves all PDF
-figures to `img/cal/`.
+This reads from `data/MNIST_EVAL` and `data/CIFAR_EVAL` and saves all PDF
+figures to `img/cal/`. To rebuild the `_EVAL` directories from the original
+exports:
+
+```bash
+python prepare_eval_data.py
+```
 
 ---
 
@@ -84,23 +164,29 @@ python train_models.py --dataset cifar10 --outdir data/CIFAR_PRED
 | `--batch_size` | `32` | Mini-batch size |
 
 Predictions are saved at milestones: epochs 1–9 (every epoch) and
-10, 20, …, 100.
+10, 20, …, 100. The output layer produces logits; the script checks the raw
+outputs at every milestone and aborts if they look like probabilities, so the
+double-softmax export cannot recur. The temperature is fitted on the
+validation split and recorded in `temperatures.json`. After retraining, run
+`python prepare_eval_data.py --cifar_is_clean` to rebuild the `_EVAL`
+directories (no inversion), or point `analysis.py` at the new directories
+directly.
 
 ### 2. Generate figures and ECE table
 
 ```bash
 python analysis.py \
-    --mnist_dir data/MNIST_PRED \
-    --cifar_dir data/CIFAR_PRED \
+    --mnist_dir data/MNIST_EVAL \
+    --cifar_dir data/CIFAR_EVAL \
     --outdir    img/cal
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--mnist_dir` | `data/MNIST_PRED` | MNIST prediction directory |
-| `--cifar_dir` | `data/CIFAR_PRED` | CIFAR-10 prediction directory |
+| `--mnist_dir` | `data/MNIST_EVAL` | MNIST prediction directory |
+| `--cifar_dir` | `data/CIFAR_EVAL` | CIFAR-10 prediction directory |
 | `--outdir` | `img/cal` | Output directory for PDF figures |
-| `--n_clusters` | `10` | Number of probability clusters M |
+| `--n_clusters` | `10` | Number of confidence clusters M |
 | `--m_values` | `2 3 5 8 10 15 20 30 50 …` | M values for cluster-variation plot |
 | `--skip_mnist` | — | Skip MNIST analysis |
 | `--skip_cifar` | — | Skip CIFAR-10 analysis |

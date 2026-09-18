@@ -241,12 +241,6 @@ class TrustOpinion:
             a = 0.5 * (a1 + a2)
 
         d = 1 - u - b
-        b = round(b, 2)
-        d = round(d, 2)
-        u = round(u, 2)
-        a = round(a, 2)
-        if b + d + u != 1:
-            u = 1 - (b + d)
         return TrustOpinion(b, d, u, a)
 
     def deduction(op_x: "TrustOpinion",

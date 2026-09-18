@@ -16,9 +16,14 @@ This module implements and visualises four evaluations:
   4. Dynamic assessment – per-prediction trust scores obtained by looking up
                           pre-computed cluster opinions at inference time.
 
+Evidence (per predicted class c, confidence cluster i): n_i predictions,
+t_i correct, RP_i = mean confidence, s_i = |t_i - n_i*RP_i|, r_i = n_i - s_i.
+Cumulative fusion over clusters and over classes.  See README, "Method".
+
 Usage:
-    python analysis.py --mnist_dir  data/MNIST_PRED  \
-                       --cifar_dir  data/CIFAR10_PRED \
+    python prepare_eval_data.py          # once: builds data/<DS>_EVAL
+    python analysis.py --mnist_dir  data/MNIST_EVAL \
+                       --cifar_dir  data/CIFAR_EVAL \
                        --outdir     img/cal
 
 All figures are saved as PDF files ready for LaTeX inclusion.
@@ -51,134 +56,124 @@ matplotlib.rcParams.update({'font.size': LABEL_FONTSIZE})
 # Core calibration / trust utilities
 # ═════════════════════════════════════════════════════════════════════════════
 
-def make_representatives(n_clusters: int):
-    """Return (representatives, half_step) for a uniform partition of [0,1]."""
-    step = 1.0 / n_clusters
-    half_step = step / 2.0
-    reps = [round(half_step + i * step, 6) for i in range(n_clusters)]
-    return reps, half_step
+PRIOR_WEIGHT = 2   # W in the baseline-prior quantification
 
 
-def compute_opinion_for_class(class_value: int,
-                               reps: list,
-                               half_step: float,
-                               data: pd.DataFrame) -> TrustOpinion:
+def bin_edges(n_clusters: int) -> np.ndarray:
+    """Uniform partition of [0, 1] into M clusters."""
+    return np.linspace(0.0, 1.0, n_clusters + 1)
+
+
+def bin_index(p: np.ndarray, n_clusters: int) -> np.ndarray:
+    """Cluster index of each probability; the last cluster is closed, [ (M-1)/M , 1 ]."""
+    return np.minimum((p * n_clusters).astype(int), n_clusters - 1)
+
+
+def class_evidence(data: pd.DataFrame, class_value: int, n_clusters: int) -> dict:
     """
-    Compute the fused SL trust opinion for *class_value* using cumulative
-    fusion over all probability clusters.
+    Per-cluster calibration evidence for one class.
 
-    Returns
-    -------
-    TrustOpinion
-        The fused opinion (b, d, u, a).
+    The evidence is top-label calibration restricted to the predictions of
+    class c: a prediction belongs to class c when c is its arg-max class, its
+    confidence is that maximum probability, and it is correct when the true
+    label is c.  For cluster i:
+        n_i  = number of class-c predictions whose confidence falls in cluster i
+        t_i  = number of those that are correct
+        RP_i = mean confidence inside the cluster (the representative; the
+               midpoint is NOT used because with sparse or skewed clusters it
+               misrepresents the stated confidence)
+        s_i  = |t_i - n_i * RP_i|      deviation between stated and observed
+        r_i  = n_i - s_i               predictions consistent with the stated
+                                       confidence (so r_i + s_i = n_i and the
+                                       uncertainty depends only on n_i)
     """
-    arr_l = data['True Label'].values
-    arr_p = data[f'Class_{class_value}_Probability'].values
+    n_classes = n_classes_of(data)
+    probs = data[[f'Class_{i}_Probability' for i in range(n_classes)]].values
+    labels = data['True Label'].values
+    pred = probs.argmax(axis=1)
+    sel = pred == class_value
+    conf = probs[sel].max(axis=1)
+    correct = labels[sel] == class_value
+    idx = bin_index(conf, n_clusters)
+    n = np.zeros(n_clusters, dtype=int)
+    t = np.zeros(n_clusters, dtype=int)
+    rp = np.full(n_clusters, np.nan)
+    for i in range(n_clusters):
+        m = idx == i
+        n[i] = m.sum()
+        if n[i] > 0:
+            t[i] = int(correct[m].sum())
+            rp[i] = conf[m].mean()
+    s = np.where(n > 0, np.abs(t - n * np.nan_to_num(rp)), 0.0)
+    r = n - s
+    return {'n': n, 't': t, 'rp': rp, 'r': r, 's': s}
 
-    total_pos, total_neg = 0, 0
-    for rp in reps:
-        mask = (arr_p >= rp - half_step) & (arr_p < rp + half_step)
-        n_i = mask.sum()
-        t_i = int((arr_l[mask] == class_value).sum())
-        total_pos += t_i
-        total_neg += int(round(abs(t_i - n_i * rp)))
 
-    return TrustOpinion.ev2tdu(total_pos, total_neg)
+def n_classes_of(data: pd.DataFrame) -> int:
+    return sum(1 for c in data.columns if c.startswith('Class_') and c.endswith('_Probability'))
+
+
+def compute_opinion_for_class(class_value: int, n_clusters: int,
+                              data: pd.DataFrame) -> TrustOpinion:
+    """
+    Fused SL trust opinion for *class_value*: cumulative fusion over clusters,
+    which for opinions with a common prior weight is exactly the sum of the
+    evidence (Josang, cumulative fusion == evidence addition).
+    """
+    ev = class_evidence(data, class_value, n_clusters)
+    return TrustOpinion.ev2tdu(float(ev['r'].sum()), float(ev['s'].sum()), PRIOR_WEIGHT)
 
 
 def compute_global_opinion(data: pd.DataFrame,
-                            n_clusters: int = 10) -> TrustOpinion:
+                           n_clusters: int = 10) -> TrustOpinion:
     """
-    Compute the global trust opinion for a NN by fusing per-class opinions.
-
-    Iterates over all 10 classes, computes each class opinion, then fuses
-    them cumulatively.
-
-    Parameters
-    ----------
-    data : pd.DataFrame
-        CSV with columns Class_0_Probability … Class_9_Probability, True Label
-    n_clusters : int
-        Number of probability clusters M.
-
-    Returns
-    -------
-    TrustOpinion
+    Global trust opinion: cumulative fusion over clusters within each class,
+    then cumulative fusion across classes.  The class subsets partition the
+    predictions (each prediction has one arg-max class), so the class opinions
+    are independent evidence and add up: r + s = N for every M, hence the
+    global uncertainty W / (N + W) does not depend on M.
     """
-    reps, half_step = make_representatives(n_clusters)
-    n_classes = sum(1 for c in data.columns if c.startswith('Class_') and
-                    c.endswith('_Probability'))
-
-    fused = None
-    for c in range(n_classes):
-        op_c = compute_opinion_for_class(c, reps, half_step, data)
-        fused = op_c if fused is None else TrustOpinion.cumFuse(fused, op_c)
-    return fused
+    R, S = 0.0, 0.0
+    for c in range(n_classes_of(data)):
+        ev = class_evidence(data, c, n_clusters)
+        R += ev['r'].sum()
+        S += ev['s'].sum()
+    return TrustOpinion.ev2tdu(float(R), float(S), PRIOR_WEIGHT)
 
 
 def build_cluster_lookup(data: pd.DataFrame,
-                          n_clusters: int = 10) -> dict:
-    """
-    Build a lookup table: {(class_value, cluster_rep) -> TrustOpinion}.
-
-    Used for dynamic (per-prediction) trust assessment.
-    """
-    reps, half_step = make_representatives(n_clusters)
-    n_classes = sum(1 for c in data.columns if c.startswith('Class_') and
-                    c.endswith('_Probability'))
+                         n_clusters: int = 10) -> dict:
+    """Lookup table {(class_value, cluster_index) -> TrustOpinion} for the dynamic mode."""
     lookup = {}
-    for c in range(n_classes):
-        arr_l = data['True Label'].values
-        arr_p = data[f'Class_{c}_Probability'].values
-        for rp in reps:
-            mask = (arr_p >= rp - half_step) & (arr_p < rp + half_step)
-            n_i = mask.sum()
-            t_i = int((arr_l[mask] == c).sum())
-            neg_ev = int(round(abs(t_i - n_i * rp)))
-            lookup[(c, rp)] = TrustOpinion.ev2tdu(t_i, neg_ev)
+    for c in range(n_classes_of(data)):
+        ev = class_evidence(data, c, n_clusters)
+        for i in range(n_clusters):
+            lookup[(c, i)] = (TrustOpinion.ev2tdu(float(ev['r'][i]), float(ev['s'][i]), PRIOR_WEIGHT)
+                              if ev['n'][i] > 0 else TrustOpinion.vacuous())
     return lookup
 
 
 def get_per_prediction_trust(data: pd.DataFrame,
-                               lookup: dict,
-                               n_clusters: int = 10) -> dict:
+                             lookup: dict,
+                             n_clusters: int = 10) -> dict:
     """
-    Assign a trust opinion to every prediction using the pre-computed lookup.
-
-    For each sample, finds the predicted class and its confidence, maps it to
-    the nearest cluster representative, and retrieves the stored opinion.
-
-    Returns
-    -------
-    dict with keys 'belief', 'disbelief', 'uncertainty', 'confidence',
-    'correct' (bool array).
+    Assign a trust opinion to every prediction: the opinion of the
+    (predicted class, cluster of its confidence) entry of the lookup table.
     """
-    reps, half_step = make_representatives(n_clusters)
-    reps_arr = np.array(reps)
-
-    n_classes = sum(1 for c in data.columns if c.startswith('Class_') and
-                    c.endswith('_Probability'))
+    n_classes = n_classes_of(data)
     prob_cols = [f'Class_{i}_Probability' for i in range(n_classes)]
     probs = data[prob_cols].values          # (N, C)
     true_labels = data['True Label'].values
 
     pred_classes = np.argmax(probs, axis=1)
     confidences = probs[np.arange(len(probs)), pred_classes]  # max prob
+    idx = bin_index(confidences, n_clusters)
 
-    beliefs, disbeliefs, uncertainties = [], [], []
-    for i, (pred_c, conf) in enumerate(zip(pred_classes, confidences)):
-        # Find nearest cluster representative
-        nearest_rp = reps_arr[np.argmin(np.abs(reps_arr - conf))]
-        op = lookup.get((pred_c, nearest_rp),
-                        TrustOpinion.vacuous())
-        beliefs.append(op.t)
-        disbeliefs.append(op.d)
-        uncertainties.append(op.u)
-
+    ops = [lookup[(int(c), int(i))] for c, i in zip(pred_classes, idx)]
     return {
-        'belief':      np.array(beliefs),
-        'disbelief':   np.array(disbeliefs),
-        'uncertainty': np.array(uncertainties),
+        'belief':      np.array([o.t for o in ops]),
+        'disbelief':   np.array([o.d for o in ops]),
+        'uncertainty': np.array([o.u for o in ops]),
         'confidence':  confidences,
         'correct':     (pred_classes == true_labels),
     }
@@ -216,11 +211,11 @@ def compute_ece(data: pd.DataFrame, n_bins: int = 10) -> float:
     predictions = probs.argmax(axis=1)
     accuracies = (predictions == true_labels).astype(float)
 
-    bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+    idx = bin_index(confidences, n_bins)
     ece = 0.0
     n = len(true_labels)
     for i in range(n_bins):
-        mask = (confidences > bin_edges[i]) & (confidences <= bin_edges[i + 1])
+        mask = idx == i
         if mask.sum() > 0:
             bin_acc = accuracies[mask].mean()
             bin_conf = confidences[mask].mean()
@@ -280,8 +275,6 @@ def plot_trust_and_ece(directory: str, outdir: str,
         print(f"[plot_trust_and_ece] No files found in {directory}")
         return
 
-    reps, half_step = make_representatives(n_clusters)
-
     epochs = []
     metrics_bef = {'b': [], 'd': [], 'u': [], 'ece': []}
     metrics_aft = {'b': [], 'd': [], 'u': [], 'ece': []}
@@ -308,8 +301,8 @@ def plot_trust_and_ece(directory: str, outdir: str,
         metrics_aft['ece'].append(compute_ece(d_aft))
 
         for c in range(n_classes):
-            op_c_bef = compute_opinion_for_class(c, reps, half_step, d_bef)
-            op_c_aft = compute_opinion_for_class(c, reps, half_step, d_aft)
+            op_c_bef = compute_opinion_for_class(c, n_clusters, d_bef)
+            op_c_aft = compute_opinion_for_class(c, n_clusters, d_aft)
             per_class_bef['b'][c].append(op_c_bef.t)
             per_class_bef['d'][c].append(op_c_bef.d)
             per_class_bef['u'][c].append(op_c_bef.u)
@@ -339,25 +332,14 @@ def plot_trust_and_ece(directory: str, outdir: str,
                         linewidth=1.0, alpha=0.9)
             ax.set_xlabel('Epoch', fontsize=LABEL_FONTSIZE)
             ax.set_ylabel(col_lbl, fontsize=LABEL_FONTSIZE)
-            ax.set_ylim(0, 1)
+            ax.margins(y=0.1)
+            ax.ticklabel_format(axis='y', style='plain', useOffset=False)
             if row == 0:
                 ax.set_title(col_lbl, fontsize=TITLE_FONTSIZE)
 
         # ECE column (col 3)
         ax_ece = axs[row][3]
-        ece_epochs = [0] + epochs
-        if row_lbl == 'Before Calibration':
-            if 'CIFAR' in directory:
-                metrics['ece'].insert(0, metrics['ece'][0]) 
-                # CIFAR-10 ECE starts around 5%
-            elif 'MNIST' in directory:
-                metrics['ece'].insert(0, 0.003)  
-        else:
-            if 'MNIST' in directory:
-                metrics['ece'].insert(0, 0.001)  # MNIST ECE after calibration ~1%
-            elif 'CIFAR' in directory:
-                metrics['ece'].insert(0, 0.02)  # CIFAR-10 ECE after calibration ~1%
-
+        ece_epochs = epochs
         ax_ece.plot(ece_epochs, metrics['ece'], color='steelblue',
                     linewidth=2.0, marker='o', markersize=3)
         ax_ece.set_xlabel('Epoch', fontsize=LABEL_FONTSIZE)
@@ -446,11 +428,15 @@ def plot_cluster_variation(directory: str, outdir: str,
         ax.set_xlabel('Number of clusters $M$', fontsize=LABEL_FONTSIZE)
         ax.set_ylabel('Opinion component', fontsize=LABEL_FONTSIZE)
         ax.set_title(title, fontsize=TITLE_FONTSIZE)
-        ax.set_xticks(m_values)
-        ax.set_xticklabels([str(m) for m in m_values], rotation=45)
+        ax.set_xscale('log')
+        ticks = [m for m in m_values if m in (2, 5, 10, 20, 50, 100, 200, 500, 1000)]
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([str(m) for m in ticks])
+        ax.minorticks_off()
         ax.legend(fontsize=LABEL_FONTSIZE - 1)
         ax.grid(axis='y', linestyle='--', alpha=0.4)
-        ax.set_ylim(0, 1)
+        ax.margins(y=0.1)
+        ax.ticklabel_format(axis='y', style='plain', useOffset=False)
 
     fig.suptitle(
         f'{dataset_name} — Trust opinion vs. number of clusters '
@@ -505,8 +491,8 @@ def plot_dynamic_assessment(directory: str, outdir: str,
     row_labels = ['Before Calibration', 'After Calibration']
 
     n_bins = n_clusters
-    bin_edges   = np.linspace(0, 1, n_bins + 1)
-    bin_centres = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    edges       = np.linspace(0, 1, n_bins + 1)
+    bin_centres = 0.5 * (edges[:-1] + edges[1:])
     hist_bins   = np.linspace(0, 1, n_clusters + 1)
     hist_centres= 0.5 * (hist_bins[:-1] + hist_bins[1:])
     bar_width   = (hist_bins[1] - hist_bins[0]) * 0.85
@@ -572,8 +558,9 @@ def plot_dynamic_assessment(directory: str, outdir: str,
         # --- Panel C: mean opinion per confidence bin ---
         ax = axs[row][2]
         mean_b, mean_d, mean_u = [], [], []
+        conf_idx = bin_index(confidence, n_bins)
         for i in range(n_bins):
-            m = (confidence > bin_edges[i]) & (confidence <= bin_edges[i + 1])
+            m = conf_idx == i
             if m.sum() > 0:
                 mean_b.append(belief[m].mean())
                 mean_d.append(disbelief[m].mean())
@@ -633,7 +620,6 @@ def plot_trust_all(directory: str, outdir: str,
         print(f"[plot_trust_all] No files found in {directory}")
         return
 
-    reps, half_step = make_representatives(n_clusters)
     n_classes = 10
     epochs = []
     per_class_bef = {k: [[] for _ in range(n_classes)] for k in 'bdu'}
@@ -643,8 +629,8 @@ def plot_trust_all(directory: str, outdir: str,
         d_bef = pd.read_csv(bef_path)
         d_aft = pd.read_csv(aft_path)
         for c in range(n_classes):
-            op_b = compute_opinion_for_class(c, reps, half_step, d_bef)
-            op_a = compute_opinion_for_class(c, reps, half_step, d_aft)
+            op_b = compute_opinion_for_class(c, n_clusters, d_bef)
+            op_a = compute_opinion_for_class(c, n_clusters, d_aft)
             per_class_bef['b'][c].append(op_b.t)
             per_class_bef['d'][c].append(op_b.d)
             per_class_bef['u'][c].append(op_b.u)
@@ -782,10 +768,10 @@ def print_ece_table(directories: dict) -> None:
 def parse_args():
     p = argparse.ArgumentParser(
         description='Generate all calibration trust analysis figures.')
-    p.add_argument('--mnist_dir',  default='data/MNIST_PRED',
-                   help='Directory with MNIST predictions (default: data/MNIST_PRED)')
-    p.add_argument('--cifar_dir',  default='data/CIFAR_PRED',
-                   help='Directory with CIFAR-10 predictions (default: data/CIFAR_PRED)')
+    p.add_argument('--mnist_dir',  default='data/MNIST_EVAL',
+                   help='Directory with MNIST predictions (default: data/MNIST_EVAL)')
+    p.add_argument('--cifar_dir',  default='data/CIFAR_EVAL',
+                   help='Directory with CIFAR-10 predictions (default: data/CIFAR_EVAL)')
     p.add_argument('--outdir',     default='img/cal',
                    help='Output directory for PDF figures (default: img/cal)')
     p.add_argument('--n_clusters', type=int, default=10,

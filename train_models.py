@@ -15,6 +15,7 @@ as well as a loss history file loss_history.npy.
 """
 
 import os
+import json
 import argparse
 import numpy as np
 import pandas as pd
@@ -199,6 +200,7 @@ def train_and_save(dataset: str, outdir: str,
 
     milestones = list(range(1, 10)) + list(range(10, total_epochs + 1, 10))
     loss_history = {'train': [], 'val': []}
+    temperatures = {}
     cumulative_epoch = 0
 
     for milestone in milestones:
@@ -218,16 +220,30 @@ def train_and_save(dataset: str, outdir: str,
         loss_history['val'].extend(history.history['val_loss'])
         cumulative_epoch = milestone
 
-        # ── Raw logits on test set ─────────────────────────────────────
+        # ── Raw logits on validation and test sets ─────────────────────
+        # The output layer has no activation, so these are logits.  Sanity
+        # check: logits are unbounded; if every row lies in [0, 1] and sums to
+        # one the model already applied a softmax and must NOT be softmaxed
+        # again (this is what corrupted the original CIFAR-10 export, where
+        # the max "probability" was e/(e+9) = 0.2320 for every sample).
+        logits_val = model.predict(x_val, verbose=0)
         logits_test = model.predict(x_test, verbose=0)
+        row_sums = logits_test.sum(axis=1)
+        print(f"[epoch {milestone:3d}] raw outputs: min={logits_test.min():.3f} "
+              f"max={logits_test.max():.3f} row-sum range=[{row_sums.min():.3f}, {row_sums.max():.3f}]")
+        if logits_test.min() >= 0 and logits_test.max() <= 1 and np.allclose(row_sums, 1, atol=1e-3):
+            raise RuntimeError("Model outputs look like probabilities, not logits: "
+                               "a second softmax would corrupt the exported data.")
 
-        # ── Calibration temperature ────────────────────────────────────
-        T_opt = find_optimal_temperature(logits_test, y_test)
-        print(f"[epoch {milestone:3d}] optimal T = {T_opt:.4f}")
+        # ── Calibration temperature: fitted on the VALIDATION split only ──
+        T_opt = find_optimal_temperature(logits_val, y_val)
+        temperatures[milestone] = float(T_opt)
+        print(f"[epoch {milestone:3d}] optimal T (validation set) = {T_opt:.4f}")
 
-        # ── Probabilities before / after calibration ───────────────────
+        # ── Probabilities before / after calibration (test set) ────────
         probs_bef = tf.nn.softmax(logits_test, axis=1).numpy()
         probs_aft = softmax_with_temperature(logits_test, T_opt)
+        print(f"  probs_bef: max={probs_bef.max():.4f}  mean max={probs_bef.max(axis=1).mean():.4f}")
 
         # ── Save CSVs ──────────────────────────────────────────────────
         save_predictions(probs_bef, y_test,
@@ -239,6 +255,8 @@ def train_and_save(dataset: str, outdir: str,
 
     # ── Save loss history ──────────────────────────────────────────────────
     np.save(os.path.join(outdir, 'loss_history.npy'), loss_history)
+    with open(os.path.join(outdir, 'temperatures.json'), 'w') as fh:
+        json.dump(temperatures, fh, indent=1)
     print(f"\nTraining complete. Loss history saved to {outdir}/loss_history.npy")
 
 
